@@ -32,7 +32,7 @@ PORT = int(os.environ.get("PORT", "10000"))
 BASE_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
 MAX_LEN = 3000
-COOLDOWN_SECONDS = 30
+COOLDOWN_SECONDS = 0
 
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
