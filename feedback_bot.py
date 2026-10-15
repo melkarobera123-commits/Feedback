@@ -3,8 +3,7 @@ Anonymous feedback bot for Telegram - ONLINE (webhook) version 2, for Render.
 
 NEW in this version:
   1. Every feedback gets a number and a date/time.
-  2. The sender picks a category with buttons.
-  3. Admins can reply anonymously: in the admin group, tap Reply on a feedback
+  2. Admins can reply anonymously: in the admin group, tap Reply on a feedback
      message and write the answer. The bot delivers it to the sender without
      showing who the sender or the admin is.
 
@@ -52,13 +51,6 @@ TZ_OFFSET_HOURS = int(os.environ.get("TZ_OFFSET_HOURS", "3"))
 MAX_LEN = 3000
 COOLDOWN_SECONDS = 0  # 0 = no waiting between messages
 
-CATEGORIES = {
-    "suggestion": "💡 Suggestion",
-    "complaint": "⚠️ Complaint",
-    "question": "❓ Question",
-    "other": "📝 Other",
-}
-
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -103,18 +95,29 @@ def read_ref(ref: str):
 # ---------- messages people see ----------
 
 WELCOME = (
-    "Hi! 👋 Send me your feedback and I'll pass it on anonymously.\n\n"
-    "Your name, username and ID are never shown to the admins.\n"
-    "Just type your message below, then choose a category."
+    "Baga nagaan gara bootii yaada kennuu FOCUS Jimmaa Yuunivarsiitii "
+    "Mooraa Guddaa Nagaan dhuftan! 👋\n\n"
+    "Yaada Keessan Icciitiin keessan eegamee nuun gahuu dandeessu!\n\n"
+    "✍️ Yaada keessan amma barreessaatii ergaa."
+)
+
+PROMPT = "✍️ Yaada keessan amma barreessaatii ergaa."
+
+THANKS = (
+    "Yaada keessan waan nuuf qooddaniif, Galatoomaa! FOCUS keessan! ✅\n\n"
+    "Yaada biraa erguu yoo barbaaddan, qabduu gadii tuqaa."
 )
 
 PRIVACY = (
-    "🔒 Privacy\n\n"
-    "• Admins never see your name, username, phone number or ID.\n"
-    "• To let admins answer you, each message carries a secret code that only "
-    "this bot can read. It is different for every message.\n"
-    "• The bot does not keep a database of messages.\n"
-    "• Telegram itself still knows you are talking to this bot, as with any bot."
+    "🔒 Icciitii\n\n"
+    "• Bulchitoonni maqaa, maqaa fayyadamaa, lakkoofsa bilbilaa yookaan ID "
+    "keessan gonkaa hin argan.\n"
+    "• Bulchitoonni isin deebisuu akka danda'aniif, ergaan hundi koodii "
+    "icciitii bootiin qofti dubbisuu danda'u of keessaa qaba. Koodiin kun "
+    "ergaa hunda irratti adda addaa dha.\n"
+    "• Bootiin kuusaa ergaalee hin qabu.\n"
+    "• Telegram mataan isaa, akkuma boota biroo, bootii kana waliin "
+    "haasa'uu keessan ni beeka."
 )
 
 
@@ -125,10 +128,9 @@ def now_text() -> str:
     return f"{stamp} (GMT{sign}{abs(TZ_OFFSET_HOURS)})"
 
 
-def build_admin_text(number, category: str, text: str, ref: str) -> str:
+def build_admin_text(number, text: str, ref: str) -> str:
     return (
         f"📩 <b>Feedback #{number}</b>\n"
-        f"🏷 {html.escape(category)}\n"
         f"🕒 {html.escape(now_text())}\n\n"
         f"{html.escape(text)}\n\n"
         f"↩️ <i>Reply to this message to answer anonymously.</i>\n"
@@ -144,9 +146,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Send a text message with your feedback, then tap a category. "
-        "If the admins answer, you will get their reply here.\n\n"
-        "Use /privacy to see how your privacy is protected."
+        "Yaada keessan barreessaatii ergaa. "
+        "Bulchitoonni yoo deebisan, deebii isaanii as argattu.\n\n"
+        "Icciitiin keessan akkamitti akka eegamu ilaaluuf /privacy fayyadamaa."
     )
 
 
@@ -154,85 +156,61 @@ async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(PRIVACY)
 
 
-# ---------- step 1: person writes feedback, bot asks for a category ----------
+# ---------- a person writes feedback, bot delivers it to the admins ----------
 
-async def ask_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     text = msg.text.strip()
 
     if len(text) > MAX_LEN:
-        await msg.reply_text(f"Too long. Please keep it under {MAX_LEN} characters.")
-        return
-
-    buttons = [
-        [
-            InlineKeyboardButton(CATEGORIES["suggestion"], callback_data="cat:suggestion"),
-            InlineKeyboardButton(CATEGORIES["complaint"], callback_data="cat:complaint"),
-        ],
-        [
-            InlineKeyboardButton(CATEGORIES["question"], callback_data="cat:question"),
-            InlineKeyboardButton(CATEGORIES["other"], callback_data="cat:other"),
-        ],
-    ]
-    # This reply is attached to the person's message, so when they tap a
-    # button the bot can read their original text again. No storage needed.
-    await msg.reply_text(
-        "Thanks! Which category fits best?",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-# ---------- step 2: person taps a category, bot delivers to the admins ----------
-
-async def category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    key = (query.data or "").split(":", 1)[-1]
-    category = CATEGORIES.get(key)
-    original = getattr(query.message, "reply_to_message", None)
-
-    if not category or not original or not original.text:
-        await query.edit_message_text(
-            "Sorry, I lost your message. Please send your feedback again."
+        await msg.reply_text(
+            f"Ergaan keessan baay'ee dheeraadha. Maaloo qubee {MAX_LEN} gadi ta'e barreessaa."
         )
         return
 
-    user_id = query.from_user.id
+    user_id = msg.from_user.id
     now = time.monotonic()
     wait = COOLDOWN_SECONDS - (now - _last_sent.get(user_id, 0))
     if COOLDOWN_SECONDS and wait > 0:
-        await query.answer(f"Please wait {int(wait) + 1}s.", show_alert=True)
+        await msg.reply_text(f"Maaloo sekondii {int(wait) + 1} eegaa.")
         return
     _last_sent[user_id] = now
 
-    text = original.text.strip()
-    ref = make_ref(query.message.chat.id)
+    ref = make_ref(msg.chat.id)
 
     try:
         # Send first, then use Telegram's message number as the feedback number.
         sent = await context.bot.send_message(
             chat_id=FEEDBACK_CHAT_ID,
-            text=build_admin_text("…", category, text, ref),
+            text=build_admin_text("…", text, ref),
             parse_mode=ParseMode.HTML,
         )
         number = sent.message_id
         await context.bot.edit_message_text(
             chat_id=FEEDBACK_CHAT_ID,
             message_id=number,
-            text=build_admin_text(number, category, text, ref),
+            text=build_admin_text(number, text, ref),
             parse_mode=ParseMode.HTML,
         )
     except TelegramError:
-        await query.edit_message_text(
-            "Sorry, I could not deliver your feedback. Please try again later."
+        await msg.reply_text(
+            "Dhiifama, yaada keessan ergu hin dandeenye. Maaloo yeroo booda irra deebi'aa yaalaa."
         )
         return
 
-    await query.edit_message_text(
-        f"✅ Thank you! Your feedback #{number} was sent anonymously.\n"
-        "If the admins reply, you will get the answer here."
+    again = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✍️ Yaada biraa ergi", callback_data="again")]]
     )
+    await msg.reply_text(
+        f"{THANKS}\n\n🔢 Lakkoofsa yaada keessanii: #{number}",
+        reply_markup=again,
+    )
+
+
+async def send_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await context.bot.send_message(chat_id=query.message.chat.id, text=PROMPT)
 
 
 # ---------- step 3: an admin replies in the group, bot forwards anonymously ----------
@@ -258,7 +236,7 @@ async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"💬 Reply from the admins to your feedback{label}:\n\n{msg.text}",
+            text=f"💬 Deebii bulchitootaa yaada keessan{label} irratti:\n\n{msg.text}",
         )
         await msg.reply_text("✅ Reply sent anonymously.")
     except Forbidden:
@@ -268,7 +246,7 @@ async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Please send your feedback as plain text.")
+    await update.message.reply_text("Maaloo yaada keessan barreeffamaan qofa ergaa.")
 
 
 def main() -> None:
@@ -290,9 +268,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("help", help_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("privacy", privacy_cmd, filters=filters.ChatType.PRIVATE))
-    app.add_handler(CallbackQueryHandler(category_chosen, pattern=r"^cat:"))
+    app.add_handler(CallbackQueryHandler(send_another, pattern=r"^again$"))
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ask_category)
+        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, receive_feedback)
     )
     app.add_handler(
         MessageHandler(~filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, unsupported)
