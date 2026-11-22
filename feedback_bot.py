@@ -3,9 +3,7 @@ Anonymous feedback bot for Telegram - ONLINE (webhook) version 2, for Render.
 
 NEW in this version:
   1. Every feedback gets a number and a date/time.
-  2. Admins can reply anonymously: in the admin group, tap Reply on a feedback
-     message and write the answer. The bot delivers it to the sender without
-     showing who the sender or the admin is.
+  2. Feedback is delivered to the admin group without a reply/response feature.
 
 Environment variables (set on Render, NEVER written in this file):
   BOT_TOKEN          token from @BotFather
@@ -13,25 +11,18 @@ Environment variables (set on Render, NEVER written in this file):
   WEBHOOK_SECRET     any long random text (letters/numbers/_/-)
   TZ_OFFSET_HOURS    optional, hours from UTC for the time shown (default 3)
 
-How replies work without a database:
-  Each feedback message carries a short encrypted code ("ref"). Only this bot
-  can read it. It is different for every message, so admins cannot tell that
-  two messages came from the same person. Nothing is stored on disk.
+Feedback is forwarded to the admin group. The bot does not support admin
+replies to users.
 """
-import base64
-import hashlib
-import hmac
 import html
 import logging
 import os
-import re
-import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import Forbidden, TelegramError
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -56,42 +47,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 _last_sent: dict[int, float] = {}
 
-# ---------- secret code (ref) that lets the bot find the sender again ----------
-
-_KEY = hashlib.sha256(("feedback-ref-key|" + BOT_TOKEN).encode()).digest()
-REF_RE = re.compile(r"ref:\s*([A-Za-z0-9_-]{22})")
-NUM_RE = re.compile(r"Feedback #(\d+)")
-
-
-def _pad(nonce: bytes) -> bytes:
-    return hmac.new(_KEY, b"enc" + nonce, hashlib.sha256).digest()[:6]
-
-
-def _tag(nonce: bytes, cipher: bytes) -> bytes:
-    return hmac.new(_KEY, b"tag" + nonce + cipher, hashlib.sha256).digest()[:6]
-
-
-def make_ref(user_id: int) -> str:
-    nonce = secrets.token_bytes(4)
-    cipher = bytes(a ^ b for a, b in zip(user_id.to_bytes(6, "big"), _pad(nonce)))
-    raw = nonce + cipher + _tag(nonce, cipher)
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def read_ref(ref: str):
-    try:
-        raw = base64.urlsafe_b64decode(ref + "=" * (-len(ref) % 4))
-        if len(raw) != 16:
-            return None
-        nonce, cipher, tag = raw[:4], raw[4:10], raw[10:]
-        if not hmac.compare_digest(tag, _tag(nonce, cipher)):
-            return None
-        plain = bytes(a ^ b for a, b in zip(cipher, _pad(nonce)))
-        return int.from_bytes(plain, "big")
-    except Exception:
-        return None
-
-
 # ---------- messages people see ----------
 
 WELCOME = (
@@ -112,9 +67,6 @@ PRIVACY = (
     "🔒 Icciitii\n\n"
     "• Bulchitoonni maqaa, maqaa fayyadamaa, lakkoofsa bilbilaa yookaan ID "
     "keessan gonkaa hin argan.\n"
-    "• Bulchitoonni isin deebisuu akka danda'aniif, ergaan hundi koodii "
-    "icciitii bootiin qofti dubbisuu danda'u of keessaa qaba. Koodiin kun "
-    "ergaa hunda irratti adda addaa dha.\n"
     "• Bootiin kuusaa ergaalee hin qabu.\n"
     "• Telegram mataan isaa, akkuma boota biroo, bootii kana waliin "
     "haasa'uu keessan ni beeka."
@@ -128,13 +80,11 @@ def now_text() -> str:
     return f"{stamp} (GMT{sign}{abs(TZ_OFFSET_HOURS)})"
 
 
-def build_admin_text(number, text: str, ref: str) -> str:
+def build_admin_text(number, text: str) -> str:
     return (
         f"📩 <b>Feedback #{number}</b>\n"
         f"🕒 {html.escape(now_text())}\n\n"
-        f"{html.escape(text)}\n\n"
-        f"↩️ <i>Reply to this message to answer anonymously.</i>\n"
-        f"<code>ref: {ref}</code>"
+        f"{html.escape(text)}"
     )
 
 
@@ -147,7 +97,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Yaada keessan barreessaatii ergaa. "
-        "Bulchitoonni yoo deebisan, deebii isaanii as argattu.\n\n"
         "Icciitiin keessan akkamitti akka eegamu ilaaluuf /privacy fayyadamaa."
     )
 
@@ -176,20 +125,18 @@ async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     _last_sent[user_id] = now
 
-    ref = make_ref(msg.chat.id)
-
     try:
         # Send first, then use Telegram's message number as the feedback number.
         sent = await context.bot.send_message(
             chat_id=FEEDBACK_CHAT_ID,
-            text=build_admin_text("…", text, ref),
+            text=build_admin_text("…", text),
             parse_mode=ParseMode.HTML,
         )
         number = sent.message_id
         await context.bot.edit_message_text(
             chat_id=FEEDBACK_CHAT_ID,
             message_id=number,
-            text=build_admin_text(number, text, ref),
+            text=build_admin_text(number, text),
             parse_mode=ParseMode.HTML,
         )
     except TelegramError:
@@ -213,38 +160,6 @@ async def send_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await context.bot.send_message(chat_id=query.message.chat.id, text=PROMPT)
 
 
-# ---------- step 3: an admin replies in the group, bot forwards anonymously ----------
-
-async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    target = msg.reply_to_message
-    if not target or not target.from_user or target.from_user.id != context.bot.id:
-        return
-
-    found = REF_RE.search(target.text or "")
-    if not found:
-        return  # not a feedback message (for example a confirmation)
-
-    user_id = read_ref(found.group(1))
-    if user_id is None:
-        await msg.reply_text("⚠️ I could not read the code of this feedback.")
-        return
-
-    number = NUM_RE.search(target.text or "")
-    label = f" #{number.group(1)}" if number else ""
-
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"💬 Deebii bulchitootaa yaada keessan{label} irratti:\n\n{msg.text}",
-        )
-        await msg.reply_text("✅ Reply sent anonymously.")
-    except Forbidden:
-        await msg.reply_text("⚠️ This person has blocked the bot, so I could not deliver it.")
-    except TelegramError:
-        await msg.reply_text("⚠️ Could not deliver the reply. Please try again.")
-
-
 async def unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Maaloo yaada keessan barreeffamaan qofa ergaa.")
 
@@ -258,13 +173,6 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Admin replies first, so they are never mistaken for new feedback.
-    app.add_handler(
-        MessageHandler(
-            filters.Chat(FEEDBACK_CHAT_ID) & filters.REPLY & filters.TEXT & ~filters.COMMAND,
-            admin_reply,
-        )
-    )
     app.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("help", help_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("privacy", privacy_cmd, filters=filters.ChatType.PRIVATE))
